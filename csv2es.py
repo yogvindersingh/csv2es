@@ -21,8 +21,10 @@ import click
 from joblib import Parallel, delayed
 from pyelasticsearch import ElasticSearch
 from pyelasticsearch import bulk_chunks
+from pyelasticsearch import ElasticHttpError
 from pyelasticsearch import ElasticHttpNotFoundError
 from pyelasticsearch import IndexAlreadyExistsError
+
 from retrying import retry
 
 
@@ -41,7 +43,7 @@ def echo(message, quiet):
         click.echo(message)
 
 
-def documents_from_file(es, filename, delimiter, quiet):
+def documents_from_file(es, filename, delimiter, quiet, document_id_in_file):
     """
     Return a generator for pulling rows from a given delimited file.
 
@@ -49,6 +51,8 @@ def documents_from_file(es, filename, delimiter, quiet):
     :param filename: the name of the file to read from or '-' if stdin
     :param delimiter: the delimiter to use
     :param quiet: don't output anything to the console when this is True
+    :param document_id_in_file: documents in elastic search will be stored with the id passed in csv (instead of
+           auto-generated ids)
     :return: generator returning document-indexing operations
     """
     def all_docs():
@@ -65,8 +69,12 @@ def documents_from_file(es, filename, delimiter, quiet):
                 count += 1
                 if count % 10000 == 0:
                     echo('Sent documents: ' + str(count), quiet)
-                yield es.index_op(row)
 
+                if document_id_in_file:
+                    yield es.index_op(row, id=row["id"])
+                else:
+                    yield es.index_op(row)
+                    
     return all_docs
 
 
@@ -164,9 +172,11 @@ def sanitize_delimiter(delimiter, is_tab):
               help='Delete existing index if it exists')
 @click.option('--quiet', is_flag=True, required=False,
               help='Minimize console output')
+@click.option('--document_id_in_file', is_flag=True, required=False,
+              help='Elastic search document ids will be generated from ids in file')
 @click.version_option(version=__version__, )
 def cli(index_name, delete_index, mapping_file, doc_type, import_file,
-        delimiter, tab, host, docs_per_chunk, bytes_per_chunk, parallel, quiet):
+        delimiter, tab, host, docs_per_chunk, bytes_per_chunk, parallel, quiet, document_id_in_file):
     """
     Bulk import a delimited file into a target Elasticsearch instance. Common
     delimited files include things like CSV and TSV.
@@ -198,6 +208,8 @@ def cli(index_name, delete_index, mapping_file, doc_type, import_file,
         echo('Created new index: ' + index_name, quiet)
     except IndexAlreadyExistsError:
         echo('Index ' + index_name + ' already exists', quiet)
+    except ElasticHttpError as exception:
+        echo('Error creating index %s. ElasticHttpError [%s]' % (index_name, exception.error), quiet)
 
     echo('Using document type: ' + doc_type, quiet)
     if mapping_file:
@@ -207,9 +219,8 @@ def cli(index_name, delete_index, mapping_file, doc_type, import_file,
         es.put_mapping(index_name, doc_type, mapping)
 
     target_delimiter = sanitize_delimiter(delimiter, tab)
-    documents = documents_from_file(es, import_file, target_delimiter, quiet)
+    documents = documents_from_file(es, import_file, target_delimiter, quiet, document_id_in_file)
     perform_bulk_index(host, index_name, doc_type, documents, docs_per_chunk, bytes_per_chunk, parallel)
-
 
 if __name__ == "__main__":
     cli()
